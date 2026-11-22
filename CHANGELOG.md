@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Remote Control** section: Claude Code sessions running outside Orca with Remote Control, read from `~/.claude/sessions/<pid>.json` (never the `*.key` files there). Each shows its name, project, working or idle, context, cost, latest prompt and last activity; click for its card, **↗ Open on claude.ai** to open it. Sessions Orca already shows are not repeated; in **This**, only those in the focused workspace's folder. The status bar counts the ones at work (`RC 2 working`). Demo mode has two.
+
 ## 0.2.0
 
 - **Background** on each agent: background shells and Monitor watches still running, cron jobs and the `/loop` wakeup with their next run. An idle agent's row shows the next run or how many run; the status bar counts them (`2 bg`).

@@ -27,7 +27,8 @@ Pitwall stays out of your terminal. It lives in the right sidebar, which you tog
 - **Tool calls.** The latest calls with their outcome (done, running, asking you, failed, denied) and a count of each. Filter by family: file, shell, web, MCP, agent.
 - **Turn receipt.** What the current turn has done so far, and what the last one did: tools, edits, agents, errors, cost, duration.
 - **Activity.** Prompts, subagents starting and finishing, edits, failures, denials and compactions.
-- **Status bar.** `1 asking · 2 working · 1 bg · ctx 64% · $3.18` at a glance, amber when an agent needs you.
+- **Remote Control sessions.** Claude Code sessions you run outside Orca with Remote Control (`claude remote-control`, for example under a LaunchAgent) get their own **Remote Control** section: name and project, working or idle, context, cost, the latest prompt and when they were last active. Click a row for its card, or **↗ Open on claude.ai** to open the session in your browser. A session that also runs in an Orca terminal shows only once, as an Orca agent. In **This** the section lists the sessions working in the focused workspace's folder; when Orca does not give that folder (an SSH workspace, say), it lists all of them and says why.
+- **Status bar.** `1 asking · 2 working · RC 1 working · 1 bg · ctx 64% · $3.18` at a glance, amber when an agent needs you. `RC` counts Remote Control sessions at work.
 - **This workspace or all.** Follow the workspace you are in, or every agent in every workspace.
 - **One agent only.** Click ◎ on an agent to see just its card, tool calls and activity; asks from other agents still show. Show all brings the rest back.
 - **Demo mode.** A synthetic session that loops, for trying Pitwall before your agents run (menu ⋯ → Demo mode).
@@ -58,10 +59,11 @@ Pitwall reads; the one thing it changes is which terminal is in front, and only 
 | `settings:own` | Its own settings below. |
 | Tool hooks (`agent.tool.before` / `after`) | Sees each tool call as it starts and ends. It always lets the call through unchanged and never makes it wait. |
 | Files under `~/.claude` | Claude Code's session transcripts and `settings.json`, for model, tokens, cost, subagents, background work and the auto-compact window. |
+| `~/.claude/sessions/*.json` | The one small file Claude Code keeps per running session: which ones run Remote Control, their name, folder, busy or idle, and their claude.ai link. Only `<pid>.json` files are opened; the `*.key` files next to them are never read. Pitwall checks the pid is still running with `process.kill(pid, 0)`, which sends no signal and starts no process. |
 
 It never sends anything over the network, never starts a process, never types into a terminal and never
-writes outside its own storage. The one link out, **★ Star on GitHub**, opens this repository in your browser
-only when you click it, after Orca asks. Tokens, keys, passwords and connection strings in tool summaries are masked
+writes outside its own storage. The links out, **★ Star on GitHub** and a Remote Control session's **↗ Open on claude.ai**, open in your browser
+only when you click them, after Orca asks; Pitwall opens only `https://claude.ai/code/session_…` addresses it has checked. Tokens, keys, passwords and connection strings in tool summaries are masked
 before they reach the screen, so a screenshot of Pitwall does not leak them.
 
 ## Settings
@@ -94,6 +96,12 @@ agent is a sibling folder.
 - **Turns** start at a prompt, or at a slash command the model answers. Commands that run locally (`/model`, `/reload-plugins`) leave the last turn as it was.
 - **Background** comes from the transcript too: a shell or monitor is pending from the result that started it until Claude Code reports it finished, failed or stopped (or `TaskStop` ends it); a cron job until `CronDelete`, its one run, or its expiry; the wakeup until it runs, is replaced or is stopped. After a compaction, Claude Code lists the tasks still running and Pitwall drops any shell missing from that list. The next run is the time Claude Code reported, which includes the few minutes it shifts each job by; later runs keep that shift. Claude Code runs schedules only while the agent is idle: past its time while the agent works, a job shows **due**; past its time while the agent has sat idle for 20 minutes, the session is not running it any more and it leaves the list. Shells, the wakeup and cron jobs (unless durable) live in the Claude Code process, so they end when it exits: when the session is resumed, Claude Code reports its shells stopped, and a SessionStart hook, if you have one, tells Pitwall the rest are gone; without one, a schedule leaves the list once the idle rule above applies. Background agents show under Subagents; a subagent's own background shells are not tracked.
 - **Format changes.** Claude Code's transcript format is not documented. When a transcript has many rows and none Pitwall understands, its card says so instead of showing zeros.
+- **Remote Control sessions** outside Orca have known limits:
+  - No **Needs you** alert: Claude Code's session file says only busy or idle, not that a session waits on a permission prompt. Any other status shows as unknown.
+  - Their tool calls come from the transcript, so they show a few seconds after Orca's hooks would show them.
+  - Only sessions on the machine running Orca: Pitwall reads local files.
+  - `~/.claude/sessions/*.json` is internal to Claude Code and undocumented. A file Pitwall cannot read (bad JSON, a missing field) is skipped; if Claude Code changes the format, the section may go empty until Pitwall is updated.
+  - A long transcript takes a couple of seconds to read the first time (a 22 MB one took about 2 s on a dual-core laptop); it is read beside the agents in Orca, which do not wait for it.
 - **Needs you** comes from Orca: the agent waits on you (Orca reports a permission prompt as waiting) while a tool call is still open; that call is the one it asks about. Once you answer, the transcript tells Pitwall whether you allowed or denied it.
 
 ## Develop
@@ -114,7 +122,7 @@ again and approve the new fingerprint. `orca plugin shot <key> --panel pitwall` 
 src/
   shared/      snapshot types, panel/worker protocol, formatting
   worker/      Orca events and hooks, tool call tracking, pricing, masking, demo
-    claude/    Claude Code transcripts: locate, tail, parse, subagents
+    claude/    Claude Code transcripts (locate, tail, parse, subagents) and Remote Control session files
   panel/       the sidebar page: pure render functions, styles, bootstrap
 test/          builders for synthetic transcript rows
 ```
