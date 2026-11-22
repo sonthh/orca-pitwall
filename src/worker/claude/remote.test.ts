@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assert, test } from 'orca/testing'
@@ -226,5 +226,41 @@ test('RemoteSessions reads each kept session transcript, skips the ones Orca sho
   living.delete(41001)
   assert.ok(await rs.poll(root, locator, (f) => !orca.has(f.sessionId)))
   assert.equal(rs.entries.size, 0)
+  rmSync(root, { recursive: true })
+})
+
+test('an idle session settles tool calls left open (interrupted), like an Orca agent that turns idle', async () => {
+  const root = tmpRoot()
+  mkdirSync(join(root, 'projects', '-work-billing-service'), { recursive: true })
+  // Recent rows, so the call enters the live list; it never gets a result (the person pressed Esc).
+  const recent = (line: string, agoMs: number) => {
+    const j = JSON.parse(line)
+    j.timestamp = new Date(Date.now() - agoMs).toISOString()
+    return JSON.stringify(j)
+  }
+  writeFileSync(
+    join(root, 'projects', '-work-billing-service', SID_A + '.jsonl'),
+    [
+      recent(prompt(0, 'run the slow suite'), 60_000),
+      recent(assistant(1, { usage: { input_tokens: 10, output_tokens: 5 }, tools: [{ id: 'toolu_open', name: 'Bash', input: { command: 'npm test' } }] }), 50_000)
+    ].join('\n') + '\n'
+  )
+  const gate = new Gate(() => {})
+  const rs = new RemoteSessions(gate, () => {}, () => true)
+  const locator = new TranscriptLocator(() => root)
+  put(root, '41001.json', sessionJson({ status: 'busy', updatedAt: Date.now() - 40_000 }))
+  await rs.poll(root, locator, () => true)
+  assert.equal(gate.get('toolu_open')!.state, 'running')
+  put(root, '41001.json', sessionJson({ status: 'idle', updatedAt: Date.now() - 1_000, statusUpdatedAt: Date.now() - 1_000 }))
+  await rs.poll(root, locator, () => true)
+  assert.equal(gate.get('toolu_open')!.state, 'ok')
+  rmSync(root, { recursive: true })
+})
+
+test('listing skips a session file that is a symlink', async () => {
+  const root = tmpRoot()
+  writeFileSync(join(root, 'elsewhere.json'), JSON.stringify(sessionJson()))
+  symlinkSync(join(root, 'elsewhere.json'), join(root, 'sessions', '41001.json'))
+  assert.deepEqual(await listRemoteSessions(root, () => true), [])
   rmSync(root, { recursive: true })
 })

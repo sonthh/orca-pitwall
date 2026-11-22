@@ -489,7 +489,7 @@ export class Pitwall {
       remote,
       remoteNote:
         this.scope === 'focused' && !this.focusedPath && remote.length
-          ? "Showing Remote Control sessions from every folder: Orca did not give this workspace's folder on this machine."
+          ? "Showing Remote Control sessions from every folder: Orca did not say which folder on this machine the focused workspace is in."
           : null
     }
   }

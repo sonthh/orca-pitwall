@@ -105,7 +105,8 @@ export async function listRemoteSessions(root: string, alive: (pid: number) => b
     let f: RemoteSessionFile | null = null
     try {
       const path = join(dir, n)
-      const st = await fs.stat(path)
+      // lstat: a symlink could point anywhere; Claude Code writes plain files here.
+      const st = await fs.lstat(path)
       if (!st.isFile() || st.size > MAX_FILE_BYTES) continue
       f = parseSessionFile(await fs.readFile(path, 'utf8'))
     } catch {
@@ -161,7 +162,11 @@ export class RemoteSessions {
       }
       for (const key of [...this.entries.keys()]) if (!seen.has(key)) changed = this.drop(key) || changed
     }
-    for (const e of this.entries.values()) if (await e.claude.poll(locator)) changed = true
+    for (const e of this.entries.values()) {
+      if (await e.claude.poll(locator)) changed = true
+      // Idle at the prompt: a call still open was interrupted and will not report back, as when an Orca agent turns idle.
+      if (e.file.status === 'idle') this.gate.settle(e.key, e.file.statusUpdatedAt ?? e.file.updatedAt)
+    }
     return changed
   }
 
