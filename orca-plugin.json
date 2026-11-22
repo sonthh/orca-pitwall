@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "pitwall",
   "name": "Pitwall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A live pit wall for your coding agents: context, cost, subagents and every tool call, in Orca's right sidebar. Read-only, local, no network.",
   "author": {
     "name": "sonthh",

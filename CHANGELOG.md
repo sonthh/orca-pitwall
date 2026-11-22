@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - **Remote Control** section: Claude Code sessions running outside Orca with Remote Control, read from `~/.claude/sessions/<pid>.json` (never the `*.key` files there). Each shows its name, project, working or idle, context, cost, latest prompt and last activity; click for its card, **↗ Open on claude.ai** to open it. Sessions Orca already shows are not repeated; in **This**, only those in the focused workspace's folder. The status bar counts the ones at work (`RC 2 working`). Demo mode has two.
 
