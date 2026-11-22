@@ -276,3 +276,80 @@ test('a schedule on another day shows its date and time', () => {
   setBg(w, [{ ...cron, dueAt: at }])
   assert.ok(render(s, INITIAL_UI, new Date(2026, 10, 21, 18, 0).getTime()).agents.includes('>Dec 31 23:57</span>'))
 })
+
+// ---- Remote Control sessions
+
+test('Remote Control: a section with one row per session, name, project, state, context, cost, prompt and link', () => {
+  const s = demoSnapshot(now, now - 40_000, true)
+  const r = render(s, INITIAL_UI, now)
+  assert.ok(r.remote.includes('Remote Control'))
+  assert.ok(r.remote.includes('1 working · 2'))
+  assert.equal((r.remote.match(/<article class="agent line rc/g) ?? []).length, 2)
+  assert.ok(r.remote.includes('billing-a3') && r.remote.includes('billing-service'))
+  assert.ok(r.remote.includes('docs-site-7c') && r.remote.includes('docs-site'))
+  assert.ok(r.remote.includes('>Working</span> · Export invoices as CSV'))
+  assert.ok(r.remote.includes('>Idle</span> · Rewrite the onboarding guide'))
+  assert.ok(r.remote.includes('78%'), 'context of the idle session (312k of 400k)')
+  assert.ok(r.remote.includes('$6.07'))
+  assert.equal((r.remote.match(/data-action="open-remote"/g) ?? []).length, 2)
+  // No terminal to go to, no "only this one".
+  assert.ok(!r.remote.includes('data-action="focus"'))
+  assert.ok(!r.remote.includes('data-action="only"'))
+  // Remote sessions are not counted as Orca agents in the header.
+  assert.ok(r.header.includes('1 working'))
+})
+
+test('Remote Control: cost hides with the setting; a bad link gives no button; text is escaped', () => {
+  const s = demoSnapshot(now, now - 40_000, false)
+  s.remote[0].remote!.url = 'https://evil.example/code/session_01DemoRemoteBillingA1'
+  s.remote[1].remote!.name = '<img src=x onerror=alert(1)>'
+  const r = render(s, INITIAL_UI, now)
+  assert.ok(!/\$\d/.test(r.remote))
+  assert.equal((r.remote.match(/data-action="open-remote"/g) ?? []).length, 1)
+  assert.ok(!r.remote.includes('evil.example'))
+  assert.ok(!r.remote.includes('<img src=x'))
+  assert.ok(r.remote.includes('&lt;img src=x'))
+})
+
+test('Remote Control: a click opens its card in place, with the claude.ai button and no Go to terminal', () => {
+  const s = demoSnapshot(now, now - 40_000, true)
+  const key = s.remote[1].key
+  const r = render(s, { ...INITIAL_UI, expanded: { ['car:' + key]: true } }, now)
+  assert.ok(r.remote.includes('<div class="inline-card"><article class="agent card done">'))
+  assert.ok(r.remote.includes('↗ Open on claude.ai'))
+  assert.ok(r.remote.includes('Context'))
+  assert.ok(r.remote.includes('Last turn'))
+  assert.ok(!r.remote.includes('Go to terminal'))
+  assert.ok(!r.remote.includes('data-action="focus"'))
+  assert.equal((r.remote.match(/<article class="agent line rc/g) ?? []).length, 1)
+})
+
+test('Remote Control: unknown status, loading transcript, note, folded section, only mode', () => {
+  const s = demoSnapshot(now, now - 40_000, true)
+  s.remote[1] = { ...s.remote[1], state: 'unknown', loading: true, source: 'orca-only', ctxWindow: 0, costUsd: null }
+  s.remoteNote = 'Showing Remote Control sessions from every folder: Orca did not give this workspace\'s folder on this machine.'
+  let r = render(s, INITIAL_UI, now)
+  assert.ok(r.remote.includes('>Unknown</span> · reading its transcript…'))
+  assert.ok(r.remote.includes('Showing Remote Control sessions from every folder'))
+  r = render(s, { ...INITIAL_UI, expanded: { 'sec:remote': false } }, now)
+  assert.ok(r.remote.includes('Remote Control'))
+  assert.ok(!r.remote.includes('<article'))
+  r = render(s, { ...INITIAL_UI, only: s.agents[0].key }, now)
+  assert.equal(r.remote, '')
+})
+
+test('Remote Control without Orca agents: a short line instead of the welcome, and the footer stays', () => {
+  const s = { ...demoSnapshot(now, now - 40_000, true), agents: [], gate: [], log: [], note: 'No agents in this workspace yet.' }
+  const r = render(s, INITIAL_UI, now)
+  assert.ok(r.agents.includes('empty slim'))
+  assert.ok(!r.agents.includes('Try the demo'))
+  assert.ok(r.remote.includes('billing-a3'))
+  assert.ok(r.footer.includes('Star on GitHub'))
+  assert.equal(render({ ...EMPTY_SNAPSHOT }, INITIAL_UI, now).remote, '')
+})
+
+test('Remote Control tool calls carry the session name in a mixed list', () => {
+  const s = demoSnapshot(now, now - 40_000, true)
+  const r = render(s, { ...INITIAL_UI, expanded: { 'sec:calls': true } }, now)
+  assert.ok(r.gate.includes('billing-a3'))
+})

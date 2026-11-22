@@ -6,6 +6,7 @@ import '../shared/protocol'
 import { fmtUsd, pct } from '../shared/format'
 import type { AgentState, AgentView, BackgroundView, LogEntry, Scope, Snapshot, SubagentView, TurnView } from '../shared/types'
 import { claudeDir, compactSettings, TranscriptLocator, type CompactSettings } from './claude/files'
+import { isInside, RemoteSessions, type RemoteEntry, type RemoteSessionFile } from './claude/remote'
 import { ClaudeSession, turnView } from './claude/session'
 import { demoSnapshot } from './demo'
 import { Gate } from './gate'
@@ -74,6 +75,13 @@ export class Pitwall {
   private timer: ReturnType<typeof setInterval> | null = null
   private ticks = 0
   private note: string | null = null
+  /** Remote Control sessions running outside Orca, read from Claude Code's session files. */
+  readonly remote: RemoteSessions
+  /** Every session id Orca runs in a terminal, in any workspace: those are not shown again as remote. */
+  private orcaSessions = new Set<string>()
+  /** The focused workspace's folder on this machine, when Orca says; null when it cannot be known. */
+  private focusedPath: string | null = null
+  private remotePolling: Promise<void> | null = null
 
   /** When this worker started: an agent first met already done, but done after this, finished unseen. */
   private readonly startedAt = Date.now()
@@ -81,6 +89,7 @@ export class Pitwall {
   constructor(private readonly orca: OrcaWorkerApi) {
     this.gate = new Gate((e) => this.pushLog(e))
     this.locator = new TranscriptLocator(() => claudeDir(this.configDir))
+    this.remote = new RemoteSessions(this.gate, (e) => this.pushLog({ at: e.at, agentKey: e.agentKey, kind: e.kind, text: e.text }))
   }
 
   // ---- lifecycle -------------------------------------------------------------------------
@@ -92,6 +101,8 @@ export class Pitwall {
     this.compact = await compactSettings(claudeDir(this.configDir))
     await this.scheduleRefresh()
     await this.pollTranscripts()
+    // The panel's first answer does not wait for Remote Control transcripts; they follow in a post.
+    void this.pollRemote()
     this.timer = setInterval(() => void this.tick(), POLL_MS)
     // Never keep the worker process alive on its own (tests, shutdown).
     ;(this.timer as { unref?: () => void }).unref?.()
@@ -118,6 +129,7 @@ export class Pitwall {
       if (this.ticks % Math.round(REFRESH_MS / POLL_MS) === 0) void this.scheduleRefresh()
       if (this.ticks % 10 === 1) this.compact = await compactSettings(claudeDir(this.configDir))
       if (await this.pollTranscripts()) this.dirty = true
+      void this.pollRemote()
       // Calls read from the transcript after a restart, while the agent already waits on the person.
       for (const t of this.tracked.values()) if (asks(t.state)) this.gate.blocked(t.key, t.stateSince)
       if (this.demo) this.dirty = true
@@ -191,6 +203,7 @@ export class Pitwall {
         for (const a of res.agents) this.upsert(a, ctx.workspaceId ?? null, ctx.displayName ?? '', ctx.branch || null, seen, titles)
       }
       this.note = ctx ? null : 'No workspace is focused.'
+      this.focusedPath = ctx?.workspaceId ? await this.workspacePath(ctx.workspaceId) : null
     } else {
       const res = await call<{
         workspaces: { id: string; name: string; branch: string | null; hostId: string | null; status?: { terminalCount: number } }[]
@@ -205,6 +218,7 @@ export class Pitwall {
       }
       this.note = null
     }
+    await this.readOrcaSessions()
     // The scope changed while this ran: its answer is stale, the queued refresh will redo it.
     if (scope !== this.scope) {
       this.refreshQueued = true
@@ -218,6 +232,34 @@ export class Pitwall {
         this.gate.forget(key)
         this.dirty = true
       }
+  }
+
+  /** The folder of a workspace on this machine, from `workspace.list`; null for another host or when Orca does not say. */
+  private async workspacePath(workspaceId: string): Promise<string | null> {
+    try {
+      const res = (await this.orca.host.call('workspace.list' as never, undefined as never)) as { workspaces?: { id: string; path?: string; hostId?: string | null }[] }
+      const w = res?.workspaces?.find((x) => x.id === workspaceId)
+      const local = w && (w.hostId === null || w.hostId === undefined || w.hostId === 'local')
+      return local && typeof w.path === 'string' && w.path.startsWith('/') ? w.path : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Session ids of every agent in an Orca terminal, so a Remote Control session there is not shown twice. */
+  private async readOrcaSessions(): Promise<void> {
+    try {
+      const res = (await this.orca.host.call('agents.list' as never, undefined as never)) as { agents?: AgentRow[] }
+      this.orcaSessions = new Set((res?.agents ?? []).map((a) => a.sessionId).filter((x): x is string => !!x))
+    } catch {
+      // Keep the last answer; the agents Pitwall tracks are checked as well.
+    }
+  }
+
+  /** A Remote Control session is shown when Orca does not show it and, in focused scope, it runs in the focused workspace. */
+  wantRemote(f: RemoteSessionFile): boolean {
+    if (this.orcaSessions.has(f.sessionId) || this.tracked.has(`s:${f.sessionId}`)) return false
+    return this.scope === 'all' || !this.focusedPath || isInside(f.cwd, this.focusedPath)
   }
 
   private upsert(a: AgentRow, workspaceId: string | null, workspaceName: string, branch: string | null, seen: Set<string>, titles: Map<string, string>): void {
@@ -318,6 +360,25 @@ export class Pitwall {
     return changed
   }
 
+  /**
+   * Reads the Remote Control sessions, one run at a time. The tick does not wait for it: the first read
+   * of a long transcript takes seconds and must not hold up the agents in Orca's terminals.
+   */
+  pollRemote(): Promise<void> {
+    if (this.remotePolling) return this.remotePolling
+    this.remotePolling = this.remote
+      .poll(claudeDir(this.configDir), this.locator, (f) => this.wantRemote(f))
+      .then((changed) => {
+        if (changed) this.dirty = true
+      })
+      // Claude Code's session files are internal: whatever goes wrong there must not stop the panel.
+      .catch((err) => this.orca.log(`remote sessions: ${(err as Error).message}`))
+      .finally(() => {
+        this.remotePolling = null
+      })
+    return this.remotePolling
+  }
+
   private ctxWindow(model: string | null): { window: number; basis: 'model' | 'compact' | 'setting' } {
     if (this.contextSetting !== 'auto') {
       const n = Number(this.contextSetting)
@@ -385,12 +446,36 @@ export class Pitwall {
     }
   }
 
+  /** A Remote Control session as an agent with no terminal: busy is working, idle is done, anything else unknown. */
+  remoteView(e: RemoteEntry, now: number): AgentView {
+    const f = e.file
+    const state: AgentState = f.status === 'busy' ? 'working' : f.status === 'idle' ? 'done' : 'unknown'
+    const project = f.cwd.replace(/\/+$/, '').split('/').pop() || f.cwd
+    const t: Tracked = {
+      key: e.key,
+      sessionId: f.sessionId,
+      terminalId: null,
+      workspaceId: null,
+      agentKind: 'claude',
+      title: f.name,
+      workspaceName: project,
+      branch: null,
+      state,
+      stateSince: f.statusUpdatedAt ?? f.updatedAt,
+      claude: e.claude,
+      unseen: false
+    }
+    return { ...this.view(t, now), remote: { url: f.url, name: f.name, project, cwd: f.cwd, updatedAt: f.updatedAt } }
+  }
+
   snapshot(now = Date.now()): Snapshot {
     if (this.demo) return demoSnapshot(now, this.demoStartedAt, this.showCost)
     const order: Record<AgentState, number> = { blocked: 0, working: 1, waiting: 2, done: 3, unknown: 4 }
     const agents = [...this.tracked.values()].map((t) => this.view(t, now))
     agents.sort((a, b) => order[a.state] - order[b.state] || b.stateSince - a.stateSince)
-    const keys = new Set(agents.map((a) => a.key))
+    const remote = [...this.remote.entries.values()].filter((e) => this.wantRemote(e.file)).map((e) => this.remoteView(e, now))
+    remote.sort((a, b) => order[a.state] - order[b.state] || (b.remote?.updatedAt ?? 0) - (a.remote?.updatedAt ?? 0))
+    const keys = new Set([...agents, ...remote].map((a) => a.key))
     return {
       v: 1,
       at: now,
@@ -400,7 +485,12 @@ export class Pitwall {
       agents,
       gate: this.gate.list(160, (e) => keys.has(e.agentKey)),
       log: this.log.filter((e) => keys.has(e.agentKey)).slice(-60),
-      note: agents.length === 0 ? (this.note ?? 'No agents in this workspace yet. Start Claude Code in an Orca terminal.') : this.note
+      note: agents.length === 0 ? (this.note ?? 'No agents in this workspace yet. Start Claude Code in an Orca terminal.') : this.note,
+      remote,
+      remoteNote:
+        this.scope === 'focused' && !this.focusedPath && remote.length
+          ? "Showing Remote Control sessions from every folder: Orca did not give this workspace's folder on this machine."
+          : null
     }
   }
 
@@ -435,6 +525,9 @@ export class Pitwall {
     await this.orca.settings.set('scope', scope).catch(() => {})
     await this.scheduleRefresh()
     await this.pollTranscripts()
+    // A run that started before the scope changed may have kept the old set: run once more.
+    await this.pollRemote()
+    await this.pollRemote()
     this.flush(true)
     return this.snapshot()
   }
@@ -496,18 +589,22 @@ export function statusBarOf(snap: Snapshot, enabled: boolean): { text: string; t
   if (working) parts.push(`${working} working`)
   else if (idle > 0) parts.push(`${idle} idle`)
   else if (!agents.length) parts.push('no agents')
+  const rc = (snap.remote ?? []).filter((a) => a.state === 'working').length
+  if (rc) parts.push(`RC ${rc} working`)
   if (subs) parts.push(`${subs} sub`)
   const bg = agents.reduce((n, a) => n + a.backgroundCount.running + a.backgroundCount.scheduled, 0)
   if (bg) parts.push(`${bg} bg`)
   if (ctx !== null) parts.push(`ctx ${ctx}%`)
   if (cost !== null) parts.push(fmtUsd(cost))
-  const tone = asking ? 'warning' : ctx !== null && ctx >= 90 ? 'danger' : ctx !== null && ctx >= 75 ? 'warning' : working ? 'accent' : 'neutral'
-  const tooltip = agents.length
-    ? agents
-        .slice(0, 8)
-        .map((a) => `${a.state === 'blocked' ? '⏸' : a.state === 'working' ? '▶' : '·'} ${a.workspaceName || a.title}${a.ctxWindow ? ` · ctx ${Math.round(pct(a.ctxTokens, a.ctxWindow))}%` : ''}${a.backgroundCount.running + a.backgroundCount.scheduled ? ` · ${a.backgroundCount.running + a.backgroundCount.scheduled} bg` : ''}`)
-        .join('\n') + '\n\nClick to toggle the Pitwall sidebar'
-    : 'Pitwall: click to toggle the sidebar'
+  const tone = asking ? 'warning' : ctx !== null && ctx >= 90 ? 'danger' : ctx !== null && ctx >= 75 ? 'warning' : working || rc ? 'accent' : 'neutral'
+  const rcLines = (snap.remote ?? []).slice(0, 6).map((a) => `RC ${a.state === 'working' ? '▶' : '·'} ${a.title}${a.remote ? ` · ${a.remote.project}` : ''}${a.ctxWindow ? ` · ctx ${Math.round(pct(a.ctxTokens, a.ctxWindow))}%` : ''}`)
+  const lines = [
+    ...agents
+      .slice(0, 8)
+      .map((a) => `${a.state === 'blocked' ? '⏸' : a.state === 'working' ? '▶' : '·'} ${a.workspaceName || a.title}${a.ctxWindow ? ` · ctx ${Math.round(pct(a.ctxTokens, a.ctxWindow))}%` : ''}${a.backgroundCount.running + a.backgroundCount.scheduled ? ` · ${a.backgroundCount.running + a.backgroundCount.scheduled} bg` : ''}`),
+    ...rcLines
+  ]
+  const tooltip = lines.length ? lines.join('\n') + '\n\nClick to toggle the Pitwall sidebar' : 'Pitwall: click to toggle the sidebar'
   return { text: parts.join(' · '), tone, tooltip, visible: enabled }
 }
 
@@ -543,9 +640,10 @@ export function fitSnapshot(snap: Snapshot, limit = POST_LIMIT): Snapshot {
   if (size() <= limit) return s
   s = { ...s, gate: s.gate.slice(-60), log: s.log.slice(-20) }
   if (size() <= limit) return s
-  s = { ...s, agents: s.agents.map((a) => ({ ...a, subagents: a.subagents.filter((x) => x.status === 'running').slice(-4) })) }
+  const trim = (a: AgentView) => ({ ...a, subagents: a.subagents.filter((x) => x.status === 'running').slice(-4) })
+  s = { ...s, agents: s.agents.map(trim), remote: s.remote.map(trim) }
   if (size() <= limit) return s
-  return { ...s, agents: s.agents.slice(0, 20), gate: [], log: [] }
+  return { ...s, agents: s.agents.slice(0, 20), remote: s.remote.slice(0, 10), gate: [], log: [] }
 }
 
 function asks(state: AgentState): boolean {

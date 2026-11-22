@@ -157,6 +157,21 @@ b { font-weight: 600; }
 .s-running .ico, .k-spawn .ico { color: var(--run); }
 
 .empty { padding: 28px 12px; text-align: center; }
+.empty.slim { padding: 10px 4px 2px; text-align: left; }
+/* A Remote Control row: name, project, time and link above; state, prompt, context and cost below. */
+.line.rc { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto 24px; grid-template-areas: "chev top time go" ". sub meta go"; column-gap: 6px; row-gap: 1px; align-items: center; }
+.rc .chev { grid-area: chev; }
+.rc .rc-top { grid-area: top; }
+.rc .time { grid-area: time; }
+.rc .rc-go { grid-area: go; display: flex; justify-content: center; }
+.rc .rc-sub { grid-area: sub; }
+.rc .rc-meta { grid-area: meta; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.rc .rc-top, .rc .rc-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc .rc-top .dot { display: inline-block; margin-right: 5px; vertical-align: 1px; }
+.rc-state.working { color: var(--run); }
+.rc-note { padding: 2px 4px 4px; }
+.rc-foot { display: flex; align-items: center; gap: 8px; }
+.rc-foot .ell { flex: 1 1 auto; min-width: 0; }
 .empty-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
 .empty p { margin: 0 0 8px; }
 .primary { margin-top: 6px; padding: 5px 14px; border-radius: var(--radius); background: var(--orca-primary, var(--fg)); color: var(--orca-primary-foreground, var(--bg)); font-weight: 500; }

@@ -89,6 +89,21 @@ export interface AgentView {
   background: BackgroundView[]
   /** All of it, including any not sent: running (shells, monitors) and scheduled (cron jobs, wakeup). */
   backgroundCount: { running: number; scheduled: number }
+  /** Set on a Claude Code Remote Control session running outside Orca (no terminal to go to). */
+  remote?: RemoteInfo
+}
+
+/** A Remote Control session Pitwall found in Claude Code's session files, not in an Orca terminal. */
+export interface RemoteInfo {
+  /** Its page on claude.ai, checked against CLAUDE_SESSION_URL; null when the id does not fit. */
+  url: string | null
+  /** The session's name as Claude Code reports it. */
+  name: string
+  /** Last folder of its working directory. */
+  project: string
+  cwd: string
+  /** Last time Claude Code updated the session file. */
+  updatedAt: number
 }
 
 export interface GateEntry {
@@ -120,6 +135,10 @@ export interface Snapshot {
   gate: GateEntry[]
   log: LogEntry[]
   note: string | null
+  /** Claude Code Remote Control sessions running outside Orca on this machine. */
+  remote: AgentView[]
+  /** Why the Remote Control list is not limited to the focused workspace, when it is not. */
+  remoteNote: string | null
 }
 
 export const EMPTY_SNAPSHOT: Snapshot = {
@@ -131,5 +150,7 @@ export const EMPTY_SNAPSHOT: Snapshot = {
   agents: [],
   gate: [],
   log: [],
-  note: null
+  note: null,
+  remote: [],
+  remoteNote: null
 }

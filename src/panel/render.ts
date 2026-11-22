@@ -1,6 +1,7 @@
 // Pure rendering: snapshot + UI state + clock -> HTML strings, one per section. No DOM access,
 // so it runs in Node tests. Every value from the snapshot goes through esc().
 import { fmtClock, fmtDuration, fmtTokens, fmtUntil, fmtUsd, modelLabel, pct } from '../shared/format'
+import { isClaudeSessionUrl } from '../shared/links'
 import { VERSION } from '../shared/version'
 import type { AgentView, BackgroundView, GateEntry, LogEntry, Snapshot, SubagentView, ToolFamily, TurnView } from '../shared/types'
 
@@ -23,7 +24,7 @@ export function esc(v: unknown): string {
 }
 
 const STATE_LABEL: Record<string, string> = { working: 'Working', blocked: 'Needs you', waiting: 'Waiting', done: 'Idle', unknown: '' }
-const SECTION_DEFAULT: Record<string, boolean> = { idle: true, calls: false, log: false }
+const SECTION_DEFAULT: Record<string, boolean> = { idle: true, remote: true, calls: false, log: false }
 
 function since(at: number, now: number): string {
   return `<span data-since="${at}">${esc(fmtDuration(now - at))}</span>`
@@ -51,7 +52,7 @@ function goButton(s: Snapshot, key: string, label: string, cls = 'go'): string {
 }
 
 function nameOf(s: Snapshot, key: string): string {
-  const a = s.agents.find((x) => x.key === key)
+  const a = s.agents.find((x) => x.key === key) ?? s.remote.find((x) => x.key === key)
   return a ? a.title || a.workspaceName : 'An agent'
 }
 
@@ -63,6 +64,17 @@ export function sectionOpen(ui: UiState, name: string): boolean {
 export function visibleAgents(s: Snapshot, ui: UiState): AgentView[] {
   if (ui.only && s.agents.some((a) => a.key === ui.only)) return s.agents.filter((a) => a.key === ui.only)
   return s.agents
+}
+
+/** Keys whose tool calls and activity show: the shown agents, and the Remote Control sessions unless one agent is picked. */
+function shownKeys(s: Snapshot, ui: UiState): Set<string> {
+  const keys = new Set(visibleAgents(s, ui).map((a) => a.key))
+  if (!onlyOne(s, ui)) for (const r of s.remote) keys.add(r.key)
+  return keys
+}
+
+function onlyOne(s: Snapshot, ui: UiState): boolean {
+  return !!ui.only && s.agents.some((a) => a.key === ui.only)
 }
 
 function ctxPct(a: AgentView): number | null {
@@ -299,17 +311,18 @@ function recentCalls(a: AgentView, s: Snapshot, now: number): string {
 }
 
 function stateBadge(a: AgentView, now: number): string {
-  return `<span class="state ${esc(a.state)}">${esc(STATE_LABEL[a.state] ?? a.state)} ${since(a.stateSince, now)}</span>`
+  const label = a.remote && a.state === 'unknown' ? 'Unknown' : STATE_LABEL[a.state] ?? a.state
+  return `<span class="state ${esc(a.state)}">${esc(label)} ${since(a.stateSince, now)}</span>`
 }
 
 function onlyButton(a: AgentView, ui: UiState): string {
-  if (ui.only === a.key) return ''
+  if (ui.only === a.key || a.remote) return ''
   return `<button class="icon small-icon" data-action="only" data-key="${esc(a.key)}" title="Show only this agent" aria-label="Show only this agent">◎</button>`
 }
 
 function agentCard(a: AgentView, s: Snapshot, ui: UiState, now: number, collapsible: boolean): string {
   const name = a.title || a.workspaceName
-  const second = s.scope === 'all' ? a.workspaceName : a.branch
+  const second = a.remote ? a.remote.project : s.scope === 'all' ? a.workspaceName : a.branch
   const meta = [a.model ? modelLabel(a.model) : a.agentKind, a.effort ?? '', s.showCost && a.costUsd !== null ? fmtUsd(a.costUsd) : ''].filter(Boolean)
   const head = `<div class="card-head${collapsible ? ' clickable' : ''}"${collapsible ? ` data-action="expand" data-key-x="car:${esc(a.key)}" title="Collapse" tabindex="0" role="button"` : ''}>
     <div class="name clamp" title="${esc(name)}">${collapsible ? '<span class="chev">▾</span>' : ''}${esc(name)}</div>
@@ -322,8 +335,55 @@ function agentCard(a: AgentView, s: Snapshot, ui: UiState, now: number, collapsi
     unknown +
     (a.source === 'transcript'
       ? [ctxBlock(a), turnBlock(a.turn, false, s.showCost, now, a, ui) || turnBlock(a.lastTurn, true, s.showCost, now, a, ui), subagentBlock(a, ui, now), backgroundBlock(a, ui, now), recentCalls(a, s, now)].join('')
-      : `<div class="block sub-t small">${a.loading ? 'Reading its transcript…' : a.agentKind === 'claude' ? 'Waiting for its transcript…' : 'State and tool calls only: Pitwall reads Claude Code transcripts today.'}</div>${recentCalls(a, s, now)}`)
+      : `<div class="block sub-t small">${a.loading ? 'Reading its transcript…' : a.agentKind === 'claude' ? 'Waiting for its transcript…' : 'State and tool calls only: Pitwall reads Claude Code transcripts today.'}</div>${recentCalls(a, s, now)}`) +
+    (a.remote ? remoteFoot(a, now) : '')
   return `<article class="agent card ${esc(a.state)}"><div class="card-tools">${a.canFocus ? `<button class="icon small-icon" data-action="focus" data-key="${esc(a.key)}" title="Go to its terminal" aria-label="Go to its terminal">↗</button>` : ''}${onlyButton(a, ui)}${collapsible ? `<button class="icon small-icon" data-action="expand" data-key-x="car:${esc(a.key)}" title="Close details" aria-label="Close details">×</button>` : ''}</div>${head}${body}</article>`
+}
+
+/** The way out of a Remote Control card: where it runs, when it was last active, and its page on claude.ai. */
+function remoteFoot(a: AgentView, now: number): string {
+  const r = a.remote!
+  return `<div class="block rc-foot"><span class="sub-t small ell" title="${esc(r.cwd)}">Last active ${ago(r.updatedAt, now)} ago</span>${openButton(a, '↗ Open on claude.ai', 'go soft')}</div>`
+}
+
+/** Opens the session's claude.ai page; only for a URL that passes the check. */
+function openButton(a: AgentView, label: string, cls: string): string {
+  if (!a.remote || !isClaudeSessionUrl(a.remote.url)) return ''
+  return `<button class="${cls}" data-action="open-remote" data-key="${esc(a.key)}" title="Open this session on claude.ai">${label}</button>`
+}
+
+const RC_WORD: Record<string, string> = { working: 'Working', done: 'Idle' }
+
+/** One Remote Control session, two lines: name and project, then its state and latest prompt. */
+function remoteRow(a: AgentView, s: Snapshot, now: number): string {
+  const r = a.remote!
+  const p = ctxPct(a)
+  const prompt = a.turn?.prompt || a.lastTurn?.prompt || ''
+  const word = RC_WORD[a.state] ?? 'Unknown'
+  const detail = a.loading ? 'reading its transcript…' : prompt
+  const meta = [
+    p !== null ? `<span class="pill ${ctxTone(p)}" title="Context ${esc(fmtTokens(a.ctxTokens))} / ${esc(fmtTokens(a.ctxWindow))}">${Math.round(p)}%</span>` : '',
+    s.showCost && a.costUsd !== null ? `<span class="muted small" title="API list price of this session">${esc(fmtUsd(a.costUsd))}</span>` : ''
+  ].join('')
+  return `<article class="agent line rc ${esc(a.state)}" data-action="expand" data-key-x="car:${esc(a.key)}" title="Show details" tabindex="0" role="button" aria-expanded="false">
+  <span class="chev">▸</span>
+  <span class="rc-top">${a.state === 'working' ? '<span class="dot run"></span>' : ''}<span class="name">${esc(r.name)}</span> <span class="muted">${esc(r.project)}</span></span>
+  <span class="muted time" title="Last activity">${ago(r.updatedAt, now)}</span>
+  <span class="rc-go">${openButton(a, '↗', 'icon go-icon')}</span>
+  <span class="rc-sub sub-t small"${prompt ? ` title="${esc(prompt)}"` : ''}><span class="rc-state ${esc(a.state)}">${word}</span>${detail ? ` · ${esc(detail)}` : ''}</span>
+  <span class="rc-meta">${meta}</span>
+</article>`
+}
+
+/** Claude Code Remote Control sessions running outside Orca on this machine. Hidden while one agent is picked. */
+export function renderRemote(s: Snapshot, ui: UiState, now: number): string {
+  if (!s.remote.length || onlyOne(s, ui)) return ''
+  const working = s.remote.filter((a) => a.state === 'working').length
+  const head = sectionHead('remote', 'Remote Control', `${working ? `${working} working · ` : ''}${s.remote.length}`, ui)
+  if (!sectionOpen(ui, 'remote')) return `<section class="sec rc-sec">${head}</section>`
+  const rows = s.remote.map((a) => (ui.expanded['car:' + a.key] ? `<div class="inline-card">${agentCard(a, s, ui, now, true)}</div>` : remoteRow(a, s, now))).join('')
+  const note = s.remoteNote ? `<div class="muted small rc-note">${esc(s.remoteNote)}</div>` : ''
+  return `<section class="sec rc-sec">${head}<div class="lines">${note}${rows}</div></section>`
 }
 
 function idleRow(a: AgentView, s: Snapshot, ui: UiState, now: number): string {
@@ -356,7 +416,8 @@ function sectionHead(name: string, title: string, extra: string, ui: UiState): s
 }
 
 export function renderAgents(s: Snapshot, ui: UiState, now: number): string {
-  if (!s.agents.length) return renderEmpty(s)
+  // With Remote Control sessions below, a line is enough; the full welcome is for an empty panel.
+  if (!s.agents.length) return s.remote.length ? `<section class="empty slim"><div class="sub-t small">${esc(s.note ?? 'No agents in Orca terminals.')}</div></section>` : renderEmpty(s)
   const shown = visibleAgents(s, ui)
   const active = shown.filter((a) => isLive(a) || ui.only === a.key)
   // Just finished and not looked at first, then the most recent: the list answers "what needs a look?".
@@ -372,7 +433,7 @@ export function renderAgents(s: Snapshot, ui: UiState, now: number): string {
 const FAMILIES: ToolFamily[] = ['file', 'shell', 'web', 'mcp', 'agent', 'other']
 
 export function renderGate(s: Snapshot, ui: UiState, now: number): string {
-  const keys = new Set(visibleAgents(s, ui).map((a) => a.key))
+  const keys = shownKeys(s, ui)
   const g = s.gate.filter((e) => keys.has(e.agentKey) || !s.agents.some((a) => a.key === e.agentKey) && !ui.only)
   if (!g.length) return ''
   const counts = { running: 0, asking: 0, ok: 0, error: 0, denied: 0 }
@@ -405,7 +466,7 @@ export function renderGate(s: Snapshot, ui: UiState, now: number): string {
 const LOG_ICON: Record<LogEntry['kind'], string> = { prompt: '›', spawn: '+', done: '✓', edit: '✎', error: '✗', denied: '⊘', asking: '?', compact: '↺', turn: '·' }
 
 export function renderLog(s: Snapshot, ui: UiState, now: number): string {
-  const keys = new Set(visibleAgents(s, ui).map((a) => a.key))
+  const keys = shownKeys(s, ui)
   // "Turn done" rows repeat what the cards already say; the activity list keeps the events.
   const log = s.log.filter((l) => l.kind !== 'turn' && (keys.has(l.agentKey) || (!ui.only && !s.agents.some((a) => a.key === l.agentKey))))
   if (!log.length) return ''
@@ -440,6 +501,7 @@ export interface Rendered {
   header: string
   alerts: string
   agents: string
+  remote: string
   gate: string
   log: string
   footer: string
@@ -447,7 +509,7 @@ export interface Rendered {
 
 /** A quiet line at the end of the panel, once there is something above it. */
 export function renderFooter(s: Snapshot): string {
-  if (!s.agents.length) return ''
+  if (!s.agents.length && !s.remote.length) return ''
   return `<footer class="foot"><span class="ver">Pitwall ${esc(VERSION)}</span><span class="dot-sep">·</span><button class="quiet-link" data-action="github" title="Pitwall is free and open source: a star helps others find it">★ Star on GitHub</button></footer>`
 }
 
@@ -456,6 +518,7 @@ export function render(s: Snapshot, ui: UiState, now: number): Rendered {
     header: renderHeader(s, ui),
     alerts: renderAlerts(s, now),
     agents: renderAgents(s, ui, now),
+    remote: renderRemote(s, ui, now),
     gate: renderGate(s, ui, now),
     log: renderLog(s, ui, now),
     footer: renderFooter(s)

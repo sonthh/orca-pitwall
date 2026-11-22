@@ -125,7 +125,9 @@ test('status bar text: asking first, context and cost', () => {
     agents: [],
     gate: [],
     log: [],
-    note: null
+    note: null,
+    remote: [],
+    remoteNote: null
   }
   assert.equal(statusBarOf(base, true).text, 'no agents')
   const agent = {
@@ -246,7 +248,7 @@ test('a failed agents.list keeps the agents; hooks from other workspaces are ign
 test('a huge snapshot is trimmed under the post limit', () => {
   const gate = Array.from({ length: 160 }, (_, i) => ({ id: `g${i}`, at: i, endedAt: i, agentKey: 'k', sub: false, tool: 'Bash', family: 'shell' as const, summary: 'x'.repeat(90), state: 'ok' as const }))
   const log = Array.from({ length: 60 }, (_, i) => ({ at: i, agentKey: 'k', kind: 'edit' as const, text: 'y'.repeat(200) }))
-  const s: Snapshot = { v: 1, at: 0, scope: 'all', demo: false, showCost: true, agents: [], gate, log, note: null }
+  const s: Snapshot = { v: 1, at: 0, scope: 'all', demo: false, showCost: true, agents: [], gate, log, note: null, remote: [], remoteNote: null }
   const out = fitSnapshot(s, 10_000)
   assert.ok(JSON.stringify(out).length <= 10_000 || out.gate.length === 0)
   assert.equal(fitSnapshot(s).gate.length, 160)
@@ -336,6 +338,101 @@ test('an agent first seen already done, after Pitwall started, is new', async ()
   const byTerm = (k: string) => s.agents.find((a) => a.key.includes(k === 't1' ? SID : 'bbbbbbbb'))!
   assert.equal(byTerm('t1').unseen, true)
   assert.equal(byTerm('t2').unseen, false)
+  await worker.deactivate()
+  rmSync(root, { recursive: true })
+})
+
+// ---- Remote Control sessions outside Orca (synthetic files; the pids are this test's own process and its parent, so they are alive)
+
+const RC_SID = '22222222-aaaa-4bbb-8ccc-000000000001'
+
+function withRemote(root: string): void {
+  mkdirSync(join(root, 'sessions'), { recursive: true })
+  mkdirSync(join(root, 'projects', '-work-app-billing'), { recursive: true })
+  writeFileSync(
+    join(root, 'projects', '-work-app-billing', RC_SID + '.jsonl'),
+    [prompt(0, 'export invoices as CSV'), assistant(1, { usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 30_000 } })].join('\n') + '\n'
+  )
+  const base = { cwd: '/work/app/billing', kind: 'interactive', entrypoint: 'sdk-cli', status: 'busy', updatedAt: Date.now() - 5_000, statusUpdatedAt: Date.now() - 60_000 }
+  writeFileSync(join(root, 'sessions', `${process.pid}.json`), JSON.stringify({ ...base, pid: process.pid, sessionId: RC_SID, name: 'billing-a3', bridgeSessionId: 'session_01TestBridgeRemoteA' }))
+  // The Orca agent's own session also runs Remote Control: Orca shows it, so it must not show twice.
+  writeFileSync(join(root, 'sessions', `${process.ppid}.json`), JSON.stringify({ ...base, pid: process.ppid, sessionId: SID, name: 'in-orca', bridgeSessionId: 'session_01TestBridgeRemoteB' }))
+  // A secret next to them that must never be read.
+  writeFileSync(join(root, 'sessions', `${process.pid}.deadbeef.key`), 'not-json-secret')
+}
+
+async function mountedRemote(root: string, workspaces: unknown) {
+  const host = mockHost({
+    capabilities: caps,
+    settings: { claudeConfigDir: root },
+    results: {
+      'workspace.readContext': { workspaceId: 'w1', branch: 'main', displayName: 'app', terminals: [{ id: 't1' }] },
+      'workspace.list': workspaces,
+      'agents.list': { agents: [{ terminalId: 't1', title: 'Claude', agent: 'claude', state: 'working', stateStartedAt: 1, sessionId: SID }] },
+      'terminal.list': { terminals: [{ id: 't1' }] },
+      'statusBar.update': {}
+    }
+  })
+  const worker = await mountWorker(main, { host, hooks, events })
+  return { host, worker }
+}
+
+test('Remote Control sessions outside Orca: shown once, read like an agent, limited to the focused workspace folder', async () => {
+  const root = fakeClaudeDir()
+  withRemote(root)
+  const inApp = { workspaces: [{ id: 'w1', kind: 'worktree', name: 'app', path: '/work/app', branch: 'main', hostId: 'local' }], truncated: false }
+  const { host, worker } = await mountedRemote(root, inApp)
+  // The first read runs beside the tick; a scope request waits for it.
+  let s = await worker.request('pitwall.setScope', { scope: 'focused' })
+  assert.equal(s.agents.length, 1)
+  assert.deepEqual(
+    s.remote.map((a) => a.key),
+    ['rc:' + RC_SID],
+    'the Orca session is not repeated'
+  )
+  const r = s.remote[0]
+  assert.equal(r.title, 'billing-a3')
+  assert.equal(r.state, 'working')
+  assert.equal(r.canFocus, false)
+  assert.equal(r.source, 'transcript')
+  assert.equal(r.ctxTokens, 30_120)
+  assert.equal(r.turn!.prompt, 'export invoices as CSV')
+  assert.deepEqual(r.remote, { url: 'https://claude.ai/code/session_01TestBridgeRemoteA', name: 'billing-a3', project: 'billing', cwd: '/work/app/billing', updatedAt: r.remote!.updatedAt })
+  assert.equal(s.remoteNote, null)
+  assert.ok(statusBarOf(s, true).text.includes('RC 1 working'))
+
+  // Another folder is focused: the session is not in it.
+  host.respond('workspace.list', { workspaces: [{ id: 'w1', kind: 'worktree', name: 'app', path: '/work/other', branch: 'main', hostId: 'local' }], truncated: false })
+  s = await worker.request('pitwall.setScope', { scope: 'focused' })
+  assert.equal(s.remote.length, 0)
+  assert.ok(!statusBarOf(s, true).text.includes('RC'))
+
+  // All workspaces: every session again.
+  s = await worker.request('pitwall.setScope', { scope: 'all' })
+  assert.equal(s.remote.length, 1)
+  assert.equal(s.remoteNote, null)
+
+  // The folder cannot be known (an SSH workspace): every session, with the reason.
+  host.respond('workspace.list', { workspaces: [{ id: 'w1', kind: 'worktree', name: 'app', path: '/home/dev/app', branch: 'main', hostId: 'ssh:box' }], truncated: false })
+  s = await worker.request('pitwall.setScope', { scope: 'focused' })
+  assert.equal(s.remote.length, 1)
+  assert.ok(s.remoteNote && s.remoteNote.includes("folder"))
+  assert.deepEqual(worker.refusals, [])
+  await worker.deactivate()
+  rmSync(root, { recursive: true })
+})
+
+test('broken session files never break the snapshot', async () => {
+  const root = fakeClaudeDir()
+  mkdirSync(join(root, 'sessions'), { recursive: true })
+  writeFileSync(join(root, 'sessions', `${process.pid}.json`), '{"pid":' + process.pid + ',"sessionId":')
+  writeFileSync(join(root, 'sessions', `${process.ppid}.json`), JSON.stringify({ pid: process.ppid, bridgeSessionId: 'session_01TestBridgeRemoteC' }))
+  const { worker } = await mountedRemote(root, () => {
+    throw hostError('timeout', 'slow')
+  })
+  const s = await worker.request('pitwall.setScope', { scope: 'all' })
+  assert.equal(s.agents.length, 1)
+  assert.equal(s.remote.length, 0)
   await worker.deactivate()
   rmSync(root, { recursive: true })
 })

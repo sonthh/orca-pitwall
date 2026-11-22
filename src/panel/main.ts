@@ -3,6 +3,7 @@
 import '../shared/protocol'
 import { fmtDuration, fmtUntil } from '../shared/format'
 import { EMPTY_SNAPSHOT, type Scope, type Snapshot, type ToolFamily } from '../shared/types'
+import { isClaudeSessionUrl } from '../shared/links'
 import { INITIAL_UI, REPO_URL, render, sectionOpen, type Rendered, type UiState } from './render'
 import { CSS } from './styles'
 
@@ -35,7 +36,7 @@ function mountShell(): void {
   const style = document.createElement('style')
   style.textContent = CSS
   document.head.appendChild(style)
-  for (const k of ['header', 'alerts', 'agents', 'gate', 'log', 'footer'] as (keyof Rendered)[]) {
+  for (const k of ['header', 'alerts', 'agents', 'remote', 'gate', 'log', 'footer'] as (keyof Rendered)[]) {
     const el = document.createElement('div')
     el.dataset.part = k
     document.body.appendChild(el)
@@ -152,6 +153,18 @@ function onClick(e: MouseEvent): void {
     setUi({ menu: false })
     // Only on this click, in the person's browser; Orca asks once before opening github.com.
     void request(async () => (orca.shell ? orca.shell.openExternal(REPO_URL) : null))
+    return
+  }
+  if (action === 'open-remote') {
+    const r = snap.remote.find((x) => x.key === target.dataset.key)
+    const url = r?.remote?.url
+    target.blur()
+    // The demo's sessions are invented; a real one opens only a claude.ai/code/session_… URL, and only on this click.
+    if (snap.demo || !isClaudeSessionUrl(url)) {
+      if (!snap.demo) console.warn('pitwall: not a claude.ai session link')
+      return
+    }
+    void request(async () => (orca.shell ? orca.shell.openExternal(url) : null))
     return
   }
   if (action === 'reset') {

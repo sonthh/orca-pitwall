@@ -181,6 +181,67 @@ export function demoSnapshot(now: number, startedAt: number, showCost: boolean):
     background: [],
     backgroundCount: { running: 0, scheduled: 0 }
   }
+  // Two Remote Control sessions running outside Orca: one at work, one idle.
+  const rc1Calls: [string, string][] = [
+    ['Read', 'src/invoices/export.ts'],
+    ['Bash', 'npm test -- invoices'],
+    ['Edit', 'src/invoices/export.ts']
+  ]
+  const rcShown = Math.min(rc1Calls.length, 1 + Math.floor(t / 20))
+  for (let i = 0; i < rcShown; i++) {
+    const [tool, summary] = rc1Calls[i]
+    const start = 3 + i * 20
+    const running = i === rcShown - 1 && t < start + 6
+    gate.push({ id: `demo-rc-${i}`, at: at(start), endedAt: running ? null : at(start + 6), agentKey: 'demo-rc-1', sub: false, tool, family: familyOf(tool), summary, state: running ? 'running' : 'ok' })
+  }
+  log.push({ at: at(-60), agentKey: 'demo-rc-1', kind: 'prompt', text: 'Export invoices as CSV with the tax column' })
+  const remote = (key: string, over: Partial<AgentView>, info: NonNullable<AgentView['remote']>): AgentView => ({
+    ...a3,
+    key,
+    agentKind: 'claude',
+    title: info.name,
+    workspaceName: info.project,
+    branch: null,
+    source: 'transcript',
+    unseen: false,
+    ...over,
+    remote: info
+  })
+  const rc1 = remote(
+    'demo-rc-1',
+    {
+      state: 'working',
+      stateSince: at(-60),
+      model: 'claude-sonnet-5-5',
+      effort: 'medium',
+      ctxTokens: Math.round(84_000 + t * 900),
+      ctxWindow: 1_000_000,
+      ctxModelWindow: 1_000_000,
+      costUsd: 1.42 + t * 0.008,
+      requests: 64,
+      cacheHitPct: 93.1,
+      turn: { startedAt: at(-60), endedAt: null, prompt: 'Export invoices as CSV with the tax column', tools: 6 + rcShown, edits: 1, errors: 0, agents: 0, costUsd: 0.31 + t * 0.008 }
+    },
+    { url: 'https://claude.ai/code/session_01DemoRemoteBillingA1', name: 'billing-a3', project: 'billing-service', cwd: '/work/billing-service', updatedAt: now - 2_000 }
+  )
+  const rc2 = remote(
+    'demo-rc-2',
+    {
+      state: 'done',
+      stateSince: at(-1_840),
+      model: 'claude-opus-5-5',
+      effort: 'high',
+      ctxTokens: 312_000,
+      ctxWindow: 400_000,
+      ctxModelWindow: 1_000_000,
+      ctxBasis: 'compact',
+      costUsd: 6.07,
+      requests: 211,
+      cacheHitPct: 89.5,
+      lastTurn: { startedAt: at(-2_400), endedAt: at(-1_840), prompt: 'Rewrite the onboarding guide for the new CLI', tools: 42, edits: 9, errors: 0, agents: 2, costUsd: 1.12 }
+    },
+    { url: 'https://claude.ai/code/session_01DemoRemoteDocsSiteB2', name: 'docs-site-7c', project: 'docs-site', cwd: '/work/docs-site', updatedAt: at(-1_840) }
+  )
   log.sort((a, b) => a.at - b.at)
-  return { v: 1, at: now, scope: 'all', demo: true, showCost, agents: [a1, a2, a3], gate, log: log.slice(-60), note: null }
+  return { v: 1, at: now, scope: 'all', demo: true, showCost, agents: [a1, a2, a3], gate, log: log.slice(-60), note: null, remote: [rc1, rc2], remoteNote: null }
 }
